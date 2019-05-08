@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+set -x
 # Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -73,20 +74,43 @@
 # Development container image (name:tag)
 # This should be updated whenever we upgrade the development container.
 # (Yet another step on our way to reproducible builds.)
+
+
+# Assert whether the host operating system is a mintty or winpty environment (based on operating system).
+#
+requires_winpty(){
+    case "$OSTYPE",, in
+      win*)     true ;; # Windows
+      msys*)    true ;; # Msys, Git Bash
+      cygwin*)  true ;; # Cygwin
+    esac
+    false
+}
+
+# Return the current absolute path to an absolute path readable by a windows operating system.
+#
+get_win32abspath(){
+  # Conversion from /c/Users/mmacheerpuppy to c:\Users\mmacheerpuppy\
+  pwd  | cut -c 2- | tr '/' '\' | sed s/[a-z]/\&:\/
+}
+
 DEVCTR_IMAGE="fcuvm/dev:v5"
 
 # Naming things is hard
 MY_NAME="Firecracker $(basename "$0")"
 
 # Full path to the Firecracker tools dir on the host.
-FC_TOOLS_DIR=$(cd "$(dirname "$0")" && pwd)
+[[ requires_winpty ]] && FC_TOOLS_DIR=`get_win32abspath` || FC_TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Full path to the Firecracker sources dir on the host.
-FC_ROOT_DIR=$(cd "${FC_TOOLS_DIR}/.." && pwd)
+[[ requires_winpty ]] && FC_ROOT_DIR=$(cd "${FC_TOOLS_DIR}\\.." && get_win32abspath) || FC_ROOT_DIR=$(cd "${FC_TOOLS_DIR}/.." && pwd)
 
 # Full path to the build dir on the host.
-FC_BUILD_DIR="${FC_ROOT_DIR}/build"
+[[ requires_winpty ]] && FC_BUILD_DIR="$FC_ROOT_DIR\build"  || FC_BUILD_DIR="${FC_ROOT_DIR}/build"
 
+echo $FC_TOOLS_DIR
+echo $FC_ROOT_DIR
+echo $FC_BUILD_DIR
 # Full path to the cargo registry dir on the host. This appears on the host
 # because we want to persist the cargo registry across container invocations.
 # Otherwise, any rust crates from crates.io would be downloaded again each time
@@ -112,7 +136,6 @@ CTR_MICROVM_IMAGES_DIR="$CTR_FC_BUILD_DIR/img"
 # Global options received by $0
 # These options are not command-specific, so we store them as global vars
 OPT_UNATTENDED=false
-
 
 # Send a decorated message to stdout, followed by a new line
 #
@@ -324,14 +347,9 @@ run_devctr() {
             shift
             continue
         }
-        [[ $docker_args_done = true ]] && ctr_args+=("$1") || docker_args+=("$1")
+        [[ ${docker_args_done} = true ]] && ctr_args+=("$1") || docker_args+=("$1")
         shift
     done
-
-    # If we're running in a terminal, pass the terminal to Docker and run
-    # the container interactively
-    [[ -t 0 ]] && docker_args+=("-i")
-    [[ -t 1 ]] && docker_args+=("-t")
 
     # Try to pass these environments from host into container for network proxies
     proxies=(http_proxy HTTP_PROXY https_proxy HTTPS_PROXY no_proxy NO_PROXY)
@@ -344,13 +362,27 @@ run_devctr() {
     # Finally, run the dev container
     # Use 'z' on the --volume parameter for docker to automatically relabel the
     # content and allow sharing between containers.
-    docker run "${docker_args[@]}" \
+    if [[ requires_winpty ]]; then
+        $(MSYS_NO_PATHCONV=1 winpty docker run "${docker_args[@]}" \
         --init \
         --rm \
         --volume "$FC_ROOT_DIR:$CTR_FC_ROOT_DIR:z" \
         --env OPT_LOCAL_IMAGES_PATH="$(dirname "$CTR_MICROVM_IMAGES_DIR")" \
         --env PYTHONDONTWRITEBYTECODE=1 \
-        "$DEVCTR_IMAGE" "${ctr_args[@]}"
+        "$DEVCTR_IMAGE" "${ctr_args[@]}")
+    else
+        # If we're running in a terminal and not in winpty, pass the terminal to Docker and run
+        # the container interactively
+        [[ -t 0 ]] && docker_args+=("-i")
+        [[ -t 1 ]] && docker_args+=("-t")
+        docker run "${docker_args[@]}" \
+            --init \
+            --rm \
+            --volume "$FC_ROOT_DIR:$CTR_FC_ROOT_DIR:z" \
+            --env OPT_LOCAL_IMAGES_PATH="$(dirname "$CTR_MICROVM_IMAGES_DIR")" \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            "$DEVCTR_IMAGE" "${ctr_args[@]}"
+    fi
 }
 
 # `$0 help`
